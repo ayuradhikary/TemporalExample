@@ -4,6 +4,7 @@ import com.temporal.spring_temporal.activities.TravelActivities;
 import com.temporal.spring_temporal.dto.TravelRequest;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
+import io.temporal.workflow.Saga;
 import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.Workflow;
 import lombok.extern.slf4j.Slf4j;
@@ -37,30 +38,45 @@ public class TravelWorkflowImpl implements TravelWorkFlow {
                         .setStartToCloseTimeout(Duration.ofSeconds(10))
                         .build());
 
-        activities.bookFlight(travelRequest);
-        activities.bookHotel(travelRequest);
-        activities.arrangeTransport(travelRequest);
+        Saga.Options sagaOptions = new Saga.Options.Builder()
+                .setParallelCompensation(false)
+                .build();
 
-        // 2 minutes -> wait for user confirmation if you won't
-        // get any withing 2 min then cancel it
+        Saga saga = new Saga(sagaOptions);
 
-        log.info("Waiting for user confirmation for 2 minutes...");
+        try {
 
-        boolean isConfirmed = Workflow.await(
-                Duration.ofMinutes(2),
-                () -> isUserConfirmed);
+            activities.bookFlight(travelRequest);
+            saga.addCompensation(() -> activities.cancelFlight(travelRequest));
 
-        if (!isConfirmed) {
-            //cancel the booking
-            log.info("🛑 User did not confirm within 2 minutes, cancelling the booking for user: {}", travelRequest.getUserId());
-            activities.cancelBooking(travelRequest);
-        } else {
-            //confirm booking
-            log.info("✅ User confirmed the booking: {}", travelRequest.getUserId());
-            activities.confirmBooking(travelRequest);
+            activities.bookHotel(travelRequest);
+            saga.addCompensation(() -> activities.cancelHotel(travelRequest));
+
+            activities.arrangeTransport(travelRequest);
+            saga.addCompensation(() -> activities.cancelTransport(travelRequest));
+
+            // 2 minutes -> wait for user confirmation if you won't
+            // get any withing 2 min then cancel it
+
+            log.info("Waiting for user confirmation for 2 minutes...");
+
+            boolean isConfirmed = Workflow.await(
+                    Duration.ofMinutes(2),
+                    () -> isUserConfirmed);
+
+            if (!isConfirmed) {
+                //cancel the booking
+                log.info("🛑 User did not confirm within 2 minutes, cancelling the booking for user: {}", travelRequest.getUserId());
+                activities.cancelBooking(travelRequest);
+            } else {
+                //confirm booking
+                log.info("✅ User confirmed the booking: {}", travelRequest.getUserId());
+                activities.confirmBooking(travelRequest);
+            }
+        } catch (Exception e) {
+            log.error("❌ Error during travel booking for user: {}. Initiating compensation.", travelRequest.getUserId());
+            saga.compensate();
         }
-
         log.info("✅ Travel booking completed for user: {}", travelRequest.getUserId());
-
     }
 }
